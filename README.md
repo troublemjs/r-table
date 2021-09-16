@@ -1,2 +1,27 @@
 # r-table
-高性能，配置齐全的 Table 组件
+
+## Getting Started
+
+Install dependencies,
+
+```bash
+$ npm i
+```
+
+Start the dev server,
+
+```bash
+$ npm start
+```
+
+Build documentation,
+
+```bash
+$ npm run docs:build
+```
+
+Build library via `father-build`,
+
+```bash
+$ npm run build
+```

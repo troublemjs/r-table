@@ -1,0 +1,613 @@
+import React, { useRef, useState } from 'react';
+import PropTypes from 'prop-types';
+import cn from 'classnames';
+import memoize from 'memoize-one';
+import { Align } from 'react-window';
+
+import GridTable from './GridTable';
+import TableHeaderRow from './TableHeaderRow';
+import TableRow, { RowKey, RowRendererProps } from './TableRow';
+import TableHeaderCell, { TableHeaderCellProps } from './TableHeaderCell';
+import TableCell, { TableCellProps } from './TableCell';
+import Column, { Alignment, FrozenDirection, ColumnProps } from './Column';
+import SortOrder, { SortOrderValue } from './SortOrder';
+import ExpandIcon, { ExpandIconProps } from './ExpandIcon';
+import SortIndicator, { SortIndicatorProps } from './SortIndicator';
+import ColumnResizer from './ColumnResizer';
+import ColumnManager from './ColumnManager';
+import {
+  renderElement,
+  normalizeColumns,
+  getScrollbarSize as defaultGetScrollbarSize,
+  isObjectEqual,
+  callOrReturn,
+  hasChildren,
+  flattenOnKeys,
+  cloneArray,
+  getValue,
+  throttle,
+  noop,
+} from './utils';
+import { GetComponent, TableComponents } from './types';
+
+const RESIZE_THROTTLE_WAIT = 50;
+
+// used for memoization
+const EMPTY_ARRAY: (string | number)[] = [];
+const getColumns = memoize(
+  (columns, children) => columns || normalizeColumns(children),
+);
+
+const getContainerStyle = (
+  width: number,
+  maxWidth: number,
+  height: number,
+): React.CSSProperties => ({
+  width,
+  maxWidth,
+  height,
+  overflow: 'hidden',
+});
+const DEFAULT_COMPONENTS: TableComponents = {
+  cell: TableCell,
+  headerCell: TableHeaderCell,
+  expandIcon: ExpandIcon,
+  sortIndicator: SortIndicator,
+};
+
+export type DefaultComponents = typeof DEFAULT_COMPONENTS;
+
+//#region Event Payloads
+export interface OnScrollProps {
+  scrollLeft: number;
+  scrollTop: number;
+  horizontalScrollDirection: 'forward' | 'backward';
+  verticalScrollDirection: 'forward' | 'backward';
+  scrollUpdateWasRequested: boolean;
+}
+
+export interface OnRowRenderProps {
+  overscanStartIndex: number;
+  overscanStopIndex: number;
+  startIndex: number;
+  stopIndex: number;
+}
+//#endregion
+
+export interface BaseTableProps {
+  classPrefix?: string;
+  className?: string;
+  style?: React.CSSProperties;
+  children?: React.ReactNode;
+  columns?: ColumnProps[] | any[];
+  data: object[];
+  frozenData?: object[];
+  rowKey: RowKey;
+  width: number;
+  height?: number;
+  maxHeight?: number;
+  rowHeight: number;
+  headerHeight: number | number[];
+  footerHeight?: number;
+  fixed?: boolean;
+  disabled?: boolean;
+  overlayRenderer?: React.ReactElement;
+  emptyRenderer?: React.ElementType;
+  footerRenderer?: React.ReactElement;
+  headerRenderer?: React.ElementType<{
+    cells: any;
+    columns: any[];
+    headerIndex: number;
+  }>;
+  rowRenderer?: React.ElementType<RowRendererProps>;
+  headerClassName?:
+    | ((args: { columns: any[]; headerIndex: number }) => string)
+    | string;
+  rowClassName?:
+    | ((args: { columns: any[]; rowData: any; rowIndex: number }) => string)
+    | string;
+  headerProps?:
+    | ((args: { columns: any[]; headerIndex: number }) => object)
+    | object;
+  headerCellProps?:
+    | ((args: {
+        columns: any[];
+        column: any;
+        columnIndex: number;
+        headerIndex: number;
+      }) => object)
+    | object;
+  rowProps?:
+    | ((args: { columns: any[]; rowData: any; rowIndex: number }) => object)
+    | object;
+  cellProps?:
+    | ((args: {
+        columns: any;
+        column: any;
+        columnIndex: number;
+        rowData: any;
+        rowIndex: number;
+      }) => object)
+    | object;
+  expandIconProps?:
+    | ((args: {
+        rowData: any;
+        rowIndex: number;
+        depth: any;
+        expandable: boolean;
+        expanded: boolean;
+      }) => object)
+    | object;
+  expandColumnKey?: string;
+  defaultExpandedRowKeys?: (string | number)[];
+  expandedRowKeys?: (string | number)[];
+  onRowExpand?: (args: {
+    expanded: boolean;
+    rowData: any;
+    rowIndex: number;
+    rowKey: number | string;
+  }) => void;
+  onExpandedRowsChange?: (expandedRowKeys: (string | number)[]) => void;
+  sortBy?: {
+    key: string;
+    order: SortOrderValue;
+  };
+  sortState?: { [key: string]: SortOrderValue };
+  onColumnSort?: (args: {
+    column: any;
+    key: string;
+    order: SortOrderValue;
+  }) => void;
+  onColumnResize?: (args: { column: any; width: number }) => void;
+  onColumnResizeEnd?: (args: { column: any; width: number }) => void;
+  useIsScrolling?: boolean;
+  overscanRowCount?: number;
+  getScrollbarSize?: () => number;
+  onScroll?: (args: OnScrollProps) => void;
+  onEndReached?: (args: { distanceFromEnd: number }) => void;
+  onEndReachedThreshold?: number;
+  onRowsRendered?: (args: OnRowRenderProps) => void;
+  onScrollbarPresenceChange?: (args: {
+    size: any;
+    vertical: any;
+    horizontal: any;
+  }) => void;
+  rowEventHandlers?: {
+    [key: string]: (args: {
+      rowData: any;
+      rowIndex: number;
+      rowKey: number | string;
+      event: any;
+    }) => any;
+  };
+  components?: TableComponents;
+  // components?: Partial<{
+  //   TableCell: React.ReactElement<TableCellProps>;
+  //   TableHeaderCell: React.ReactElement<TableHeaderCellProps>;
+  //   ExpandIcon: React.ReactElement<ExpandIconProps>;
+  //   SortIndicator: React.ReactElement<SortIndicatorProps>;
+  // }>;
+}
+
+const BaseTable: React.FC<BaseTableProps> = (props) => {
+  const {
+    classPrefix,
+    className,
+    style,
+    children,
+    columns,
+    data,
+    frozenData,
+    rowKey,
+    width,
+    height,
+    maxHeight,
+    rowHeight,
+    headerHeight,
+    footerHeight,
+    fixed,
+    disabled,
+    overlayRenderer,
+    emptyRenderer,
+    footerRenderer,
+    headerRenderer,
+    rowRenderer,
+    headerClassName,
+    rowClassName,
+    headerProps,
+    headerCellProps,
+    rowProps,
+    cellProps,
+    expandIconProps,
+    expandColumnKey,
+    defaultExpandedRowKeys,
+    expandedRowKeys,
+    onRowExpand,
+    onExpandedRowsChange,
+    sortBy,
+    sortState,
+    onColumnSort,
+    onColumnResize,
+    onColumnResizeEnd,
+    useIsScrolling,
+    overscanRowCount,
+    getScrollbarSize,
+    onScroll,
+    onEndReached,
+    onEndReachedThreshold,
+    onRowsRendered,
+    onScrollbarPresenceChange,
+    rowEventHandlers,
+    components,
+  } = props;
+  const refContainer = useRef<HTMLDivElement>();
+  const refMainTable = useRef<typeof GridTable>();
+  const refLeftTable = useRef<typeof GridTable>();
+  const refRightTable = useRef<typeof GridTable>();
+  const refColumnManager = useRef(
+    new ColumnManager(getColumns(columns, children), fixed),
+  );
+
+  const getExpandedRowKeys = () => {
+    return expandedRowKeys !== undefined
+      ? expandedRowKeys || EMPTY_ARRAY
+      : expandedRowKeys;
+  };
+
+  const renderExpandIcon = ({ rowData, rowIndex, depth, onExpand }: any) => {
+    if (!expandColumnKey) return null;
+    const expandable = rowIndex >= 0 && hasChildren(rowData);
+    const expanded =
+      rowIndex >= 0 && getExpandedRowKeys().indexOf(rowData[rowKey]) >= 0;
+    const extraProps = callOrReturn(expandIconProps, {
+      rowData,
+      rowIndex,
+      depth,
+      expandable,
+      expanded,
+    });
+    const ExpandIcon = _getComponent('expandIcon');
+
+    return (
+      <ExpandIcon
+        depth={depth}
+        expandable={expandable}
+        expanded={expanded}
+        {...extraProps}
+        onExpand={onExpand}
+      />
+    );
+  };
+
+  const renderRow = ({
+    isScrolling,
+    columns,
+    rowData,
+    rowIndex,
+    style,
+  }: any) => {
+    const rowClass = callOrReturn(rowClassName, { columns, rowData, rowIndex });
+    const extraProps = props.rowProps;
+    // const extraProps = callOrReturn(rowProps, { columns, rowData, rowIndex });
+    const rowKey = rowData[props.rowKey];
+    // const depth = this._depthMap[rowKey] || 0;
+    const depth = 0;
+
+    const className = cn(_prefixClass('row'), rowClass, {
+      [_prefixClass(`row--depth-${depth}`)]:
+        !!expandColumnKey && rowIndex >= 0,
+      [_prefixClass('row--expanded')]:
+        !!expandColumnKey && getExpandedRowKeys().indexOf(rowKey) >= 0,
+      // [_prefixClass('row--hovered')]:
+      //   !isScrolling && rowKey === this.state.hoveredRowKey,
+      [_prefixClass('row--frozen')]: depth === 0 && rowIndex < 0,
+      [_prefixClass('row--customized')]: rowRenderer,
+    });
+
+    const rowProps: any = {
+      ...extraProps,
+      role: 'row',
+      key: `row-${rowKey}`,
+      isScrolling,
+      className,
+      style,
+      columns,
+      rowIndex,
+      rowData,
+      rowKey,
+      expandColumnKey,
+      depth,
+      rowEventHandlers,
+      rowRenderer,
+      cellRenderer: renderRowCell,
+      expandIconRenderer: renderExpandIcon,
+      onRowExpand: this._handleRowExpand,
+      // for fixed table, we need to sync the hover state across the inner tables
+      // onRowHover: this.columnManager.hasFrozenColumns()
+      //   ? this._handleRowHover
+      //   : null,
+    };
+
+    return <TableRow {...rowProps} />;
+  };
+
+  if (expandColumnKey) {
+    this._data = this._flattenOnKeys(
+      data,
+      this.getExpandedRowKeys(),
+      this.props.rowKey,
+    );
+  } else {
+    this._data = data;
+  }
+  // should be after `this._data` assigned
+  this._calcScrollbarSizes();
+
+  const containerStyle: React.CSSProperties = {
+    ...style,
+    width,
+    height: this._getTableHeight() + footerHeight!,
+    position: 'relative',
+  };
+  const cls = cn(classPrefix, className, {
+    [`${classPrefix}--fixed`]: fixed,
+    [`${classPrefix}--expandable`]: !!expandColumnKey,
+    [`${classPrefix}--empty`]: data.length === 0,
+    [`${classPrefix}--has-frozen-rows`]: frozenData!.length > 0,
+    [`${classPrefix}--has-frozen-columns`]:
+      this.columnManager.hasFrozenColumns(),
+    [`${classPrefix}--disabled`]: disabled,
+  });
+
+  // 最终返回
+  const retNode = (
+    <div ref={refContainer} className={cls} style={containerStyle}>
+      {this.renderFooter()}
+      {this.renderMainTable()}
+      {this.renderLeftTable()}
+      {this.renderRightTable()}
+      {this.renderResizingLine()}
+      {this.renderEmptyLayer()}
+      {this.renderOverlay()}
+    </div>
+  );
+  const _prefixClass = (className: string) =>
+    `${props.classPrefix}__${className}`;
+
+  const _getComponent: GetComponent = (name) => {
+    return components?.[name] ?? DEFAULT_COMPONENTS?.[name];
+  };
+
+  const _getHeaderHeight = () => {
+    const { headerHeight } = props;
+    if (Array.isArray(headerHeight)) {
+      return headerHeight.reduce((sum, height) => sum + height, 0);
+    }
+    return headerHeight;
+  }
+
+  const _getFrozenRowsHeight = () => {
+    const { frozenData, rowHeight } = props;
+    return frozenData!.length * rowHeight;
+  }
+
+  const _getTableHeight = () => {
+    const { height, maxHeight, footerHeight } = props;
+    let tableHeight = height! - footerHeight!;
+
+    if (maxHeight! > 0) {
+      const frozenRowsHeight = _getFrozenRowsHeight();
+      const totalRowsHeight = getTotalRowsHeight();
+      const headerHeight = _getHeaderHeight();
+      const totalHeight = headerHeight + frozenRowsHeight + totalRowsHeight + /* _horizontalScrollbarSize */ 0;
+      tableHeight = Math.min(totalHeight, maxHeight! - footerHeight!);
+    }
+
+    return tableHeight;
+  }
+
+  const _getBodyHeight = () => {
+    return _getTableHeight() - _getHeaderHeight() - _getFrozenRowsHeight();
+  }
+
+  const _getFrozenContainerHeight = () => {
+    const { maxHeight } = props;
+
+    const tableHeight = _getTableHeight() - (/* _data.length > 0 ? _horizontalScrollbarSize : 0 */0);
+    // in auto height mode tableHeight = totalHeight
+    if (maxHeight! > 0) return tableHeight;
+
+    const totalHeight = getTotalRowsHeight() + _getHeaderHeight() + _getFrozenRowsHeight();
+    return Math.min(tableHeight, totalHeight);
+  }
+
+  const _calcScrollbarSizes = () => {
+    const { fixed, width } = props;
+    const scrollbarSize = getScrollbarSize();
+    // const { scrollbarSize } = this.state;
+
+    const totalRowsHeight = getTotalRowsHeight();
+    const totalColumnsWidth = getTotalColumnsWidth();
+
+    // const prevHorizontalScrollbarSize = this._horizontalScrollbarSize;
+    // const prevVerticalScrollbarSize = this._verticalScrollbarSize;
+    const prevHorizontalScrollbarSize = 0;
+    const prevVerticalScrollbarSize = 0;
+
+    if (scrollbarSize === 0) {
+      this._horizontalScrollbarSize = 0;
+      this._verticalScrollbarSize = 0;
+    } else {
+      // we have to set `this._horizontalScrollbarSize` before calling `this._getBodyHeight`
+      if (!fixed || totalColumnsWidth <= width - scrollbarSize) {
+        this._horizontalScrollbarSize = 0;
+        this._verticalScrollbarSize = totalRowsHeight > this._getBodyHeight() ? scrollbarSize : 0;
+      } else {
+        if (totalColumnsWidth > width) {
+          this._horizontalScrollbarSize = scrollbarSize;
+          this._verticalScrollbarSize =
+            totalRowsHeight > this._getBodyHeight() - this._horizontalScrollbarSize ? scrollbarSize : 0;
+        } else {
+          this._horizontalScrollbarSize = 0;
+          this._verticalScrollbarSize = 0;
+          if (totalRowsHeight > this._getBodyHeight()) {
+            this._horizontalScrollbarSize = scrollbarSize;
+            this._verticalScrollbarSize = scrollbarSize;
+          }
+        }
+      }
+    }
+
+    if (
+      prevHorizontalScrollbarSize !== this._horizontalScrollbarSize ||
+      prevVerticalScrollbarSize !== this._verticalScrollbarSize
+    ) {
+      this._scrollbarPresenceChanged = true;
+    }
+  }
+
+  _maybeScrollbarPresenceChange() {
+    if (this._scrollbarPresenceChanged) {
+      const { onScrollbarPresenceChange } = this.props;
+      this._scrollbarPresenceChanged = false;
+
+      onScrollbarPresenceChange!({
+        size: this.state.scrollbarSize,
+        horizontal: this._horizontalScrollbarSize > 0,
+        vertical: this._verticalScrollbarSize > 0,
+      });
+    }
+  }
+
+  _maybeCallOnEndReached() {
+    const { onEndReached, onEndReachedThreshold } = this.props;
+    const { scrollTop } = this._scroll;
+    const scrollHeight = this.getTotalRowsHeight();
+    const clientHeight = this._getBodyHeight();
+
+    if (!onEndReached || !clientHeight || !scrollHeight) return;
+    const distanceFromEnd = scrollHeight - scrollTop - clientHeight + this._horizontalScrollbarSize;
+    if (
+      this._lastScannedRowIndex >= 0 &&
+      distanceFromEnd <= onEndReachedThreshold! &&
+      (this._hasDataChangedSinceEndReached || scrollHeight !== this._scrollHeight)
+    ) {
+      this._hasDataChangedSinceEndReached = false;
+      this._scrollHeight = scrollHeight;
+      onEndReached({ distanceFromEnd });
+    }
+  }
+
+  _handleScroll(args: OnScrollProps) {
+    const lastScrollTop = this._scroll.scrollTop;
+    this.scrollToPosition(args);
+    this.props.onScroll!(args);
+
+    if (args.scrollTop > lastScrollTop) this._maybeCallOnEndReached();
+  }
+
+  _handleVerticalScroll({ scrollTop }: any) {
+    const lastScrollTop = this._scroll.scrollTop;
+    this.scrollToTop(scrollTop);
+
+    if (scrollTop > lastScrollTop) this._maybeCallOnEndReached();
+  }
+
+  _handleRowsRendered(args: OnRowRenderProps) {
+    this.props.onRowsRendered!(args);
+
+    if (args.overscanStopIndex > this._lastScannedRowIndex) {
+      this._lastScannedRowIndex = args.overscanStopIndex;
+      this._maybeCallOnEndReached();
+    }
+  }
+
+  _handleRowHover({ hovered, rowKey }: any) {
+    this.setState({ hoveredRowKey: hovered ? rowKey : null });
+  }
+
+  _handleRowExpand({ expanded, rowData, rowIndex, rowKey }: any) {
+    const expandedRowKeys = cloneArray(this.getExpandedRowKeys());
+    if (expanded) {
+      if (!(expandedRowKeys.indexOf(rowKey) >= 0)) expandedRowKeys.push(rowKey);
+    } else {
+      const index = expandedRowKeys.indexOf(rowKey);
+      if (index > -1) {
+        expandedRowKeys.splice(index, 1);
+      }
+    }
+    // if `expandedRowKeys` is uncontrolled, update internal state
+    if (this.props.expandedRowKeys === undefined) {
+      this.setState({ expandedRowKeys });
+    }
+    this.props.onRowExpand!({ expanded, rowData, rowIndex, rowKey });
+    this.props.onExpandedRowsChange!(expandedRowKeys);
+  }
+
+  _handleColumnResize({ key }: any, width: any) {
+    this.columnManager.setColumnWidth(key, width);
+    this.setState({ resizingWidth: width });
+
+    const column = this.columnManager.getColumn(key);
+    this.props.onColumnResize!({ column, width });
+  }
+
+  _handleColumnResizeStart({ key }: any) {
+    this.setState({ resizingKey: key });
+  }
+
+  _handleColumnResizeStop() {
+    const { resizingKey, resizingWidth } = this.state;
+    this.setState({ resizingKey: null, resizingWidth: 0 });
+
+    if (!resizingKey || !resizingWidth) return;
+
+    const column = this.columnManager.getColumn(resizingKey);
+    this.props.onColumnResizeEnd!({ column, width: resizingWidth });
+  }
+
+  _handleColumnSort(event: { currentTarget: { dataset: { key: any } } }) {
+    const key = event.currentTarget.dataset.key;
+    const { sortBy, sortState, onColumnSort } = this.props;
+    let order: SortOrderValue = SortOrder.ASC;
+
+    if (sortState) {
+      order = sortState[key] === SortOrder.ASC ? SortOrder.DESC : SortOrder.ASC;
+    } else if (key === sortBy!.key) {
+      order = sortBy!.order === SortOrder.ASC ? SortOrder.DESC : SortOrder.ASC;
+    }
+
+    const column = this.columnManager.getColumn(key);
+    onColumnSort!({ column, key, order });
+  }
+
+  return retNode;
+};
+
+BaseTable.defaultProps = {
+  classPrefix: 'BaseTable',
+  rowKey: 'id',
+  data: [],
+  frozenData: [],
+  fixed: false,
+  headerHeight: 50,
+  rowHeight: 50,
+  footerHeight: 0,
+  defaultExpandedRowKeys: [],
+  sortBy: {} as any,
+  useIsScrolling: false,
+  overscanRowCount: 1,
+  onEndReachedThreshold: 500,
+  getScrollbarSize: defaultGetScrollbarSize,
+
+  onScroll: noop,
+  onRowsRendered: noop,
+  onScrollbarPresenceChange: noop,
+  onRowExpand: noop,
+  onExpandedRowsChange: noop,
+  onColumnSort: noop,
+  onColumnResize: noop,
+  onColumnResizeEnd: noop,
+};
+
+export default BaseTable;
